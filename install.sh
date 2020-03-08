@@ -1,6 +1,6 @@
 #!/bin/bash
 
-FORCE_KERNEL="1.20190925+1-1"
+#FORCE_KERNEL="1.20190925+1-1"
 
 if [[ $EUID -ne 0 ]]; then
    echo "This script must be run as root (use sudo)" 1>&2
