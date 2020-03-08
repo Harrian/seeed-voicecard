@@ -21,6 +21,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_gpio.h>
+#include <linux/of_graph.h>
 #include <linux/platform_device.h>
 #include <linux/string.h>
 #include <sound/soc.h>
@@ -250,6 +251,142 @@ static struct snd_soc_ops seeed_voice_card_ops = {
 	.trigger = seeed_voice_card_trigger,
 };
 
+static int graph_get_dai_id(struct device_node *ep)
+{
+	struct device_node *node;
+	struct device_node *endpoint;
+	struct of_endpoint info;
+	int i, id;
+	const u32 *reg;
+	int ret;
+
+	/* use driver specified DAI ID if exist */
+	ret = snd_soc_get_dai_id(ep);
+	if (ret != -ENOTSUPP)
+		return ret;
+
+	/* use endpoint/port reg if exist */
+	ret = of_graph_parse_endpoint(ep, &info);
+	if (ret == 0) {
+		/*
+		 * Because it will count port/endpoint if it doesn't have "reg".
+		 * But, we can't judge whether it has "no reg", or "reg = <0>"
+		 * only of_graph_parse_endpoint().
+		 * We need to check "reg" property
+		 */
+		if (of_get_property(ep,   "reg", NULL))
+			return info.id;
+
+		node = of_get_parent(ep);
+		reg = of_get_property(node, "reg", NULL);
+		of_node_put(node);
+		if (reg)
+			return info.port;
+	}
+	node = of_graph_get_port_parent(ep);
+
+	/*
+	 * Non HDMI sound case, counting port/endpoint on its DT
+	 * is enough. Let's count it.
+	 */
+	i = 0;
+	id = -1;
+	for_each_endpoint_of_node(node, endpoint) {
+		if (endpoint == ep)
+			id = i;
+		i++;
+	}
+
+	of_node_put(node);
+
+	if (id < 0)
+		return -ENODEV;
+
+	return id;
+}
+
+static int asoc_simple_parse_dai(struct device_node *ep,
+				 struct snd_soc_dai_link_component *dlc,
+				 int *is_single_link)
+{
+	struct device_node *node;
+	struct of_phandle_args args;
+	int ret;
+
+	if (!ep)
+		return 0;
+
+	node = of_graph_get_port_parent(ep);
+
+	/* Get dai->name */
+	args.np		= node;
+	args.args[0]	= graph_get_dai_id(ep);
+	args.args_count	= (of_graph_get_endpoint_count(node) > 1);
+
+	/*
+	 * FIXME
+	 *
+	 * Here, dlc->dai_name is pointer to CPU/Codec DAI name.
+	 * If user unbinded CPU or Codec driver, but not for Sound Card,
+	 * dlc->dai_name is keeping unbinded CPU or Codec
+	 * driver's pointer.
+	 *
+	 * If user re-bind CPU or Codec driver again, ALSA SoC will try
+	 * to rebind Card via snd_soc_try_rebind_card(), but because of
+	 * above reason, it might can't bind Sound Card.
+	 * Because Sound Card is pointing to released dai_name pointer.
+	 *
+	 * To avoid this rebind Card issue,
+	 * 1) It needs to alloc memory to keep dai_name eventhough
+	 *    CPU or Codec driver was unbinded, or
+	 * 2) user need to rebind Sound Card everytime
+	 *    if he unbinded CPU or Codec.
+	 */
+	ret = snd_soc_get_dai_name(&args, &dlc->dai_name);
+	if (ret < 0)
+		return ret;
+
+	dlc->of_node = node;
+
+	if (is_single_link)
+		*is_single_link = of_graph_get_endpoint_count(node) == 1;
+
+	return 0;
+}
+
+static int asoc_simple_init_dai(struct snd_soc_dai *dai,
+				     struct asoc_simple_dai *simple_dai)
+{
+	int ret;
+
+	if (!simple_dai)
+		return 0;
+
+	if (simple_dai->sysclk) {
+		ret = snd_soc_dai_set_sysclk(dai, 0, simple_dai->sysclk,
+					     simple_dai->clk_direction);
+		if (ret && ret != -ENOTSUPP) {
+			dev_err(dai->dev, "simple-card: set_sysclk error\n");
+			return ret;
+		}
+	}
+
+	if (simple_dai->slots) {
+		ret = snd_soc_dai_set_tdm_slot(dai,
+					       simple_dai->tx_slot_mask,
+					       simple_dai->rx_slot_mask,
+					       simple_dai->slots,
+					       simple_dai->slot_width);
+		if (ret && ret != -ENOTSUPP) {
+			dev_err(dai->dev, "simple-card: set_tdm_slot error\n");
+			return ret;
+		}
+	}
+
+	return 0;
+}
+
+
 static int seeed_voice_card_dai_init(struct snd_soc_pcm_runtime *rtd)
 {
 	struct seeed_card_data *priv =	snd_soc_card_get_drvdata(rtd->card);
@@ -259,11 +396,11 @@ static int seeed_voice_card_dai_init(struct snd_soc_pcm_runtime *rtd)
 		seeed_priv_to_props(priv, rtd->num);
 	int ret;
 
-	ret = asoc_simple_card_init_dai(codec, &dai_props->codec_dai);
+	ret = asoc_simple_init_dai(codec, &dai_props->codec_dai);
 	if (ret < 0)
 		return ret;
 
-	ret = asoc_simple_card_init_dai(cpu, &dai_props->cpu_dai);
+	ret = asoc_simple_init_dai(cpu, &dai_props->cpu_dai);
 	if (ret < 0)
 		return ret;
 
@@ -312,20 +449,19 @@ static int seeed_voice_card_dai_link_of(struct device_node *node,
 		goto dai_link_of_err;
 	}
 
-	ret = asoc_simple_card_parse_daifmt(dev, node, codec,
+	ret = asoc_simple_parse_daifmt(dev, node, codec,
 					    prefix, &dai_link->dai_fmt);
 	if (ret < 0)
 		goto dai_link_of_err;
 
 	of_property_read_u32(node, "mclk-fs", &dai_props->mclk_fs);
 
-	ret = asoc_simple_card_parse_cpu(cpu, dai_link,
-					 DAI, CELL, &single_cpu);
+	ret = asoc_simple_parse_cpu(cpu, dai_link, &single_cpu);
 	if (ret < 0)
 		goto dai_link_of_err;
 
 	#if _SINGLE_CODEC
-	ret = asoc_simple_card_parse_codec(codec, dai_link, DAI, CELL);
+	ret = asoc_simple_parse_codec(codec, dai_link);
 	if (ret < 0)
 		goto dai_link_of_err;
 	#else
@@ -337,7 +473,7 @@ static int seeed_voice_card_dai_link_of(struct device_node *node,
 	dev_dbg(dev, "dai_link num_codecs = %d\n", dai_link->num_codecs);
 	#endif
 
-	ret = asoc_simple_card_parse_platform(plat, dai_link, DAI, CELL);
+	ret = asoc_simple_parse_platform(plat, dai_link);
 	if (ret < 0)
 		goto dai_link_of_err;
 
@@ -360,35 +496,29 @@ static int seeed_voice_card_dai_link_of(struct device_node *node,
 		goto dai_link_of_err;
 
 	#if LINUX_VERSION_CODE <= KERNEL_VERSION(4,10,0)
-	ret = asoc_simple_card_parse_clk_cpu(cpu, dai_link, cpu_dai);
+	ret = asoc_simple_parse_clk_cpu(cpu, dai_link, cpu_dai);
 	#else
-	ret = asoc_simple_card_parse_clk_cpu(dev, cpu, dai_link, cpu_dai);
+	ret = asoc_simple_parse_clk_cpu(dev, cpu, dai_link, cpu_dai);
 	#endif
 	if (ret < 0)
 		goto dai_link_of_err;
 
 	#if LINUX_VERSION_CODE <= KERNEL_VERSION(4,10,0)
-	ret = asoc_simple_card_parse_clk_codec(codec, dai_link, codec_dai);
+	ret = asoc_simple_parse_clk_codec(codec, dai_link, codec_dai);
 	#else
-	ret = asoc_simple_card_parse_clk_codec(dev, codec, dai_link, codec_dai);
+	ret = asoc_simple_parse_clk_codec(dev, codec, dai_link, codec_dai);
 	#endif
 	if (ret < 0)
 		goto dai_link_of_err;
 
 	#if _SINGLE_CODEC
-	ret = asoc_simple_card_canonicalize_dailink(dai_link);
-	if (ret < 0)
-		goto dai_link_of_err;
+	asoc_simple_canonicalize_platform(dai_link);
 	#endif
 
-	ret = asoc_simple_card_set_dailink_name(dev, dai_link,
+	ret = asoc_simple_set_dailink_name(dev, dai_link,
 						"%s-%s",
-						dai_link->cpu_dai_name,
-						#if _SINGLE_CODEC
-						dai_link->codec_dai_name
-						#else
+						dai_link->cpus[0].dai_name,
 						dai_link->codecs[0].dai_name
-						#endif
 	);
 	if (ret < 0)
 		goto dai_link_of_err;
@@ -399,17 +529,13 @@ static int seeed_voice_card_dai_link_of(struct device_node *node,
 	dev_dbg(dev, "\tname : %s\n", dai_link->stream_name);
 	dev_dbg(dev, "\tformat : %04x\n", dai_link->dai_fmt);
 	dev_dbg(dev, "\tcpu : %s / %d\n",
-		dai_link->cpu_dai_name,
+		dai_link->cpus[0].dai_name,
 		dai_props->cpu_dai.sysclk);
 	dev_dbg(dev, "\tcodec : %s / %d\n",
-		#if _SINGLE_CODEC
-		dai_link->codec_dai_name,
-		#else
 		dai_link->codecs[0].dai_name,
-		#endif
 		dai_props->codec_dai.sysclk);
 
-	asoc_simple_card_canonicalize_cpu(dai_link, single_cpu);
+	asoc_simple_canonicalize_cpu(dai_link, single_cpu);
 
 dai_link_of_err:
 	of_node_put(cpu);
@@ -501,7 +627,7 @@ static int seeed_voice_card_parse_of(struct device_node *node,
 			goto card_parse_end;
 	}
 
-	ret = asoc_simple_card_parse_card_name(&priv->snd_card, PREFIX);
+	ret = asoc_simple_parse_card_name(&priv->snd_card, PREFIX);
 	if (ret < 0)
 		goto card_parse_end;
 
@@ -569,6 +695,9 @@ static int seeed_voice_card_probe(struct platform_device *pdev)
 		}
 	} else {
 		struct seeed_card_info *cinfo;
+		struct snd_soc_dai_link_component *cpus;
+		struct snd_soc_dai_link_component *codecs;
+		struct snd_soc_dai_link_component *platform;
 
 		cinfo = dev->platform_data;
 		if (!cinfo) {
@@ -586,12 +715,36 @@ static int seeed_voice_card_probe(struct platform_device *pdev)
 		}
 
 		priv->snd_card.name	= (cinfo->card) ? cinfo->card : cinfo->name;
+/*
 		dai_link->name		= cinfo->name;
 		dai_link->stream_name	= cinfo->name;
-		dai_link->platform_name	= cinfo->platform;
-		dai_link->codec_name	= cinfo->codec;
-		dai_link->cpu_dai_name	= cinfo->cpu_dai.name;
-		dai_link->codec_dai_name = cinfo->codec_dai.name;
+		dai_link->platforms	= cinfo->platform;
+		dai_link->num_platforms	= 1;
+		//dai_link->codec_name	= cinfo->codec;
+		dai_link->cpus		= &(cinfo->cpu_dai);
+		dai_link->num_cpus	= 1;
+		dai_link->codecs	= &(cinfo->codec_dai);
+		dai_link->num_codecs	= 1;
+		dai_link->dai_fmt	= cinfo->daifmt;
+		dai_link->init		= seeed_voice_card_dai_init;
+
+		dai_props->cpu_dai	= &priv->dais[dai_idx++];
+		dai_props->codec_dai	= &priv->dais[dai_idx++];
+*/
+
+
+		cpus			= dai_link->cpus;
+		cpus->dai_name		= cinfo->cpu_dai.name;
+
+		codecs			= dai_link->codecs;
+		codecs->name		= cinfo->codec;
+		codecs->dai_name	= cinfo->codec_dai.name;
+
+		platform		= dai_link->platforms;
+		platform->name		= cinfo->platform;
+
+		dai_link->name		= cinfo->name;
+		dai_link->stream_name	= cinfo->name;
 		dai_link->dai_fmt	= cinfo->daifmt;
 		dai_link->init		= seeed_voice_card_dai_init;
 		memcpy(&priv->dai_props->cpu_dai, &cinfo->cpu_dai,
@@ -613,7 +766,7 @@ static int seeed_voice_card_probe(struct platform_device *pdev)
 		return ret;
 
 err:
-	asoc_simple_card_clean_reference(&priv->snd_card);
+	asoc_simple_clean_reference(&priv->snd_card);
 
 	return ret;
 }
@@ -625,7 +778,7 @@ static int seeed_voice_card_remove(struct platform_device *pdev)
 
 	if (cancel_work_sync(&priv->work_codec_clk) != 0) {
 	}
-	return asoc_simple_card_clean_reference(card);
+	return asoc_simple_clean_reference(card);
 }
 
 static const struct of_device_id seeed_voice_of_match[] = {
