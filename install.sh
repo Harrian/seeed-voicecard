@@ -30,10 +30,10 @@ fi
 # make sure that we are on something ARM/Raspberry related
 # either a bare metal Raspberry or a qemu session with 
 # Raspberry stuff available
-# - check for /boot/overlays
+# - check for /boot/firmware/overlays
 # - dtparam and dtoverlay is available
 errorFound=0
-if [ ! -d /boot/overlays ] ; then
+if [ ! -d /boot/firmware/overlays ] ; then
   echo "/boot/overlays not found or not a directory" 1>&2
   errorFound=1
 fi
@@ -177,9 +177,9 @@ install_module "./" "seeed-voicecard"
 
 
 # install dtbos
-cp seeed-2mic-voicecard.dtbo /boot/overlays
-cp seeed-4mic-voicecard.dtbo /boot/overlays
-cp seeed-8mic-voicecard.dtbo /boot/overlays
+cp seeed-2mic-voicecard.dtbo /boot/firmware/overlays
+cp seeed-4mic-voicecard.dtbo /boot/firmware/overlays
+cp seeed-8mic-voicecard.dtbo /boot/firmware/overlays
 
 #install alsa plugins
 # no need this plugin now
@@ -195,13 +195,13 @@ grep -q "^snd-soc-wm8960$" /etc/modules || \
   echo "snd-soc-wm8960" >> /etc/modules  
 
 #set dtoverlays
-sed -i -e 's:#dtparam=i2c_arm=on:dtparam=i2c_arm=on:g'  /boot/config.txt || true
-grep -q "^dtoverlay=i2s-mmap$" /boot/config.txt || \
-  echo "dtoverlay=i2s-mmap" >> /boot/config.txt
+sed -i -e 's:#dtparam=i2c_arm=on:dtparam=i2c_arm=on:g'  /boot/firmware/usercfg.txt || true
+grep -q "^dtoverlay=i2s-mmap$" /boot/firmware/usercfg.txt || \
+  echo "dtoverlay=i2s-mmap" >> /boot/firmware/usercfg.txt
 
 
-grep -q "^dtparam=i2s=on$" /boot/config.txt || \
-  echo "dtparam=i2s=on" >> /boot/config.txt
+grep -q "^dtparam=i2s=on$" /boot/firmware/usercfg.txt || \
+  echo "dtparam=i2s=on" >> /boot/firmware/usercfg.txt
 
 #install config files
 mkdir /etc/voicecard || true
