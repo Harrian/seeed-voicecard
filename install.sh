@@ -128,9 +128,9 @@ which apt &>/dev/null
 if [[ $? -eq 0 ]]; then
   apt update -y
   apt-get -y install dkms git i2c-tools libasound2-plugins
-  install_kernel
+  #install_kernel
   # rpi-update checker
-  check_kernel_headers
+  #check_kernel_headers
 fi
 
 # Arch Linux
@@ -138,12 +138,6 @@ which pacman &>/dev/null
 if [[ $? -eq 0 ]]; then
   pacman -Syu --needed git gcc automake make dkms linux-raspberrypi-headers i2c-tools
 fi
-
-# locate currently installed kernels (may be different to running kernel if
-# it's just been updated)
-base_ver=$(get_kernel_version)
-base_ver=${base_ver%%[-+]*}
-kernels="${base_ver}+ ${base_ver}-v7+ ${base_ver}-v7l+"
 
 function install_module {
   local _i
@@ -164,11 +158,9 @@ function install_module {
   cp -a $src/* /usr/src/$mod-$ver/
 
   dkms add -m $mod -v $ver
-  for _i in $kernels; do
-    dkms build -k $_i -m $mod -v $ver && {
-      dkms install --force -k $_i -m $mod -v $ver
+    dkms build -m $mod -v $ver && {
+      dkms install --force -m $mod -v $ver
     }
-  done
 
   mkdir -p /var/lib/dkms/$mod/$ver/$marker
 }
